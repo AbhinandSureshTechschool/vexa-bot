@@ -46,6 +46,7 @@ import type {
   ActsSource,
   RecordingSink,
 } from './ports.js';
+import { VideoRecordingService } from '@vexa/recording';
 
 /** A console-only lifecycle sink — used for self-host (no `meetingApiCallbackUrl`) and as the
  *  pre-config fallback. The live HTTP sink (createHttpLifecycleSink) replaces it when a
@@ -196,6 +197,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   let botPipeline: BotPipeline | null = null;
   let acts: ActsSource = liveActs;
   const recording = inv.recordingEnabled ? createBotRecordingSink({ inv, log: (m) => console.log(`[bot] ${m}`) }) : undefined;
+  const videoRecording =
+    inv.recordingEnabled &&
+      inv.meeting_id !== undefined &&
+      !!inv.connectionId
+      ? new VideoRecordingService(inv.meeting_id, inv.connectionId)
+      : undefined;
   // O-TEL-1: persist the raw captured-signal.v1 stream for offline replay. Off ⇒ the tap is a
   // single undefined-check and the capture path is byte-for-byte unchanged. VEXA_CAPTURE_SIGNAL=1
   // enables it without a control plane (the local hot-loop path).
@@ -288,7 +295,45 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
     // throwing into the orchestrator's leave-on-fail backstop (which would hang the bot up).
     pipeline = createLivePipeline({
       startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, publishChat, remoteAudioActivity),   // on the live meeting page
-      startRecording: rec ? () => startRecording(sess.page, inv, rec) : undefined,          // MediaRecorder → recording.v1
+      startRecording: rec || videoRecording
+        ? async () => {
+          const stopAudio = rec
+            ? await startRecording(sess.page, inv, rec)
+            : async () => { };
+
+          let videoStarted = false;
+
+          if (videoRecording) {
+            try {
+              videoRecording.start();
+              videoStarted = true;
+            } catch (e) {
+              console.error(`[bot] video recording start failed: ${String(e)}`);
+            }
+          }
+
+          return async () => {
+            if (videoRecording && videoStarted) {
+              try {
+                await videoRecording.stop();
+
+                if (inv.recordingUploadUrl && inv.internalSecret) {
+                  await videoRecording.upload(
+                    inv.recordingUploadUrl,
+                    inv.internalSecret
+                  );
+                }
+              } catch (e) {
+                console.error(`[bot] video recording failed: ${String(e)}`);
+              } finally {
+                await videoRecording.cleanup().catch(() => { });
+              }
+            }
+
+            await stopAudio().catch(() => { });
+          };
+        }
+        : undefined,        // MediaRecorder → recording.v1
       engine: bp,
       onFault: (stage, e) => {
         console.error(`[bot] live-pipeline: ${stage} failed (non-fatal, bot stays seated): ${serr(e)}`);
