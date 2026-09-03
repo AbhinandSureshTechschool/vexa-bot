@@ -31,7 +31,7 @@ import { createRedisTranscriptSink, redisClientFrom } from './adapters/transcrip
 import { createRedisActsSource, redisActsClientFrom } from './adapters/acts-redis.js';
 import { createBrowserJoinDriver } from './join-driver.js';
 import { createBotPipeline, createLivePipeline, createTranscribe, serr, type BotPipeline } from './pipeline.js';
-import { createBotRecordingSink } from './recording.js';
+import { createBotRecordingSink, downloadAudioMaster } from './recording.js';
 import { createCaptureSignalRecorder, startBotLogSidecar, wrapTranscribeWithTap, wrapTranscriptWithSnapshot, type CaptureSignalRecorder } from './telemetry.js';
 import { uploadSignalTapes } from './signal-upload.js';
 import { createSttFaultReporter } from './stt-faults.js';
@@ -313,25 +313,44 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
           }
 
           return async () => {
-            if (videoRecording && videoStarted) {
-              try {
-                await videoRecording.stop();
+  await stopAudio().catch(() => { });
 
-                if (inv.recordingUploadUrl && inv.internalSecret) {
-                  await videoRecording.upload(
-                    inv.recordingUploadUrl,
-                    inv.internalSecret
-                  );
-                }
-              } catch (e) {
-                console.error(`[bot] video recording failed: ${String(e)}`);
-              } finally {
-                await videoRecording.cleanup().catch(() => { });
-              }
-            }
+  if (rec) {
+    await rec.waitForUploads().catch((e) => {
+      console.error(`[bot] waiting for audio uploads failed: ${String(e)}`);
+    });
+  }
 
-            await stopAudio().catch(() => { });
-          };
+  if (videoRecording && videoStarted) {
+    let audioPath: string | null = null;
+
+    try {
+      audioPath = await downloadAudioMaster(inv);
+
+      await videoRecording.stop();
+
+      if (audioPath) {
+        await videoRecording.muxAudio(audioPath);
+      }
+
+      if (inv.recordingUploadUrl && inv.internalSecret) {
+        await videoRecording.upload(
+          inv.recordingUploadUrl,
+          inv.internalSecret
+        );
+      }
+    } catch (e) {
+      console.error(`[bot] combined recording failed: ${String(e)}`);
+    } finally {
+      if (audioPath) {
+        const { unlink } = await import('node:fs/promises');
+        await unlink(audioPath).catch(() => { });
+      }
+
+      await videoRecording.cleanup().catch(() => { });
+    }
+  }
+};
         }
         : undefined,        // MediaRecorder → recording.v1
       engine: bp,

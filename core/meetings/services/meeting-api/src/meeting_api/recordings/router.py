@@ -208,7 +208,69 @@ def build_router(
         except SessionNotFound as e:
             raise HTTPException(status_code=404, detail=str(e))
         return JSONResponse(content=receipt)
+    @router.get("/internal/recordings/audio-master", include_in_schema=False)
+    async def internal_get_audio_master(
+        session_uid: str,
+        authorization: Optional[str] = Header(default=None),
+    ):
+        bearer = _bearer_token(authorization)
+        internal_secret = os.getenv("INTERNAL_API_SECRET")
 
+        if not internal_secret or bearer != internal_secret:
+            raise HTTPException(status_code=401, detail="Invalid internal API secret")
+
+        session = await repo.find_session(session_uid)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        meeting_id = session["meeting_id"]
+        recordings = await repo.get_recordings(meeting_id)
+
+        rec = next(
+            (
+                r for r in recordings
+                if r.get("session_uid") == session_uid
+                and r.get("source") == "bot"
+            ),
+            None,
+        )
+
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Bot recording not found")
+
+        recording_id = rec["id"]
+
+        master_key = await finalize_master(
+            repo,
+            storage,
+            meeting_id=meeting_id,
+            recording_id=recording_id,
+            media_type="audio",
+        )
+
+        if master_key is None:
+            raise HTTPException(status_code=404, detail="Audio master not found")
+
+        data = await storage.get(master_key)
+
+        media_file = next(
+            (m for m in rec.get("media_files", []) if m.get("type") == "audio"),
+            {},
+        )
+
+        media_format = media_file.get("format", "webm")
+
+        if media_format == "wav":
+            content_type = "audio/wav"
+        elif media_format == "webm":
+            content_type = "audio/webm"
+        else:
+            content_type = "application/octet-stream"
+
+        return Response(
+            content=data,
+            media_type=content_type,
+        )
     @router.get("/recordings")
     async def list_recordings(
         request: Request,

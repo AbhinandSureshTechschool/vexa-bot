@@ -32,6 +32,9 @@
 import { RecordingService, type RecordingMasterFormat } from '@vexa/recording';
 import type { Invocation } from './config.js';
 import type { RecordingSink } from './ports.js';
+import { writeFile, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 /** The RecordingSink extended with the chunk ingress the capture bridge's MediaRecorder tap pumps
  *  into. The orchestrator only sees close(key); the bridge holds the BotRecordingSink to feed chunks
@@ -39,6 +42,7 @@ import type { RecordingSink } from './ports.js';
 export interface BotRecordingSink extends RecordingSink {
   /** One recording.v1 chunk for `key`: monotonic seq, the COMPLETED-signal flag, format, bytes. */
   chunk(key: string, seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void;
+  waitForUploads(): Promise<void>;
 }
 
 /** Deliver ONE recording.v1 chunk. The default uploads to inv.recordingUploadUrl via
@@ -73,6 +77,47 @@ function defaultChunkUploader(inv: Invocation, log: (m: string) => void): ChunkU
   };
 }
 
+export async function downloadAudioMaster(inv: Invocation): Promise<string | null> {
+  const uploadUrl = inv.recordingUploadUrl;
+  const sessionUid = inv.connectionId;
+  const token = inv.internalSecret;
+
+  if (!uploadUrl || !sessionUid || !token) {
+    return null;
+  }
+
+  const url = new URL(uploadUrl);
+  url.pathname = '/internal/recordings/audio-master';
+  url.search = `session_uid=${encodeURIComponent(sessionUid)}`;
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Audio master download failed: ${response.status} ${await response.text()}`
+    );
+  }
+
+  const format = response.headers.get('content-type')?.includes('audio/wav')
+    ? 'wav'
+    : 'webm';
+
+  const audioPath = path.join(
+    tmpdir(),
+    `audio_master_${inv.meeting_id ?? 'unknown'}_${sessionUid}.${format}`,
+  );
+
+  const audioBytes = Buffer.from(await response.arrayBuffer());
+  await writeFile(audioPath, audioBytes);
+
+  return audioPath;
+}
+
 /**
  * Build the recording sink. Each chunk(...) uploads immediately (serialized in seq order); close(key)
  * sends the empty is_final fallback exactly once if the tap never delivered its own final chunk.
@@ -99,6 +144,9 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
 
   return {
     chunk: (_key, seq, isFinal, format, bytes) => { enqueue(seq, isFinal, format, bytes); },
+    waitForUploads: async () => {
+      await queue;
+    },
     close: (_key) => {
       // Final-signal FALLBACK: if the live Stop race dropped the trailing is_final chunk, send one
       // empty is_final so the server flips the recording COMPLETED. No-op for a never-fed session

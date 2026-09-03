@@ -174,4 +174,7 @@ RUN chmod +x /app/entrypoint.sh
 # noVNC (browser view) — present in the env base; harmless if unused.
 EXPOSE 6080
 
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 ENTRYPOINT ["/app/entrypoint.sh"]
