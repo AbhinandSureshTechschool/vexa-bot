@@ -69,9 +69,13 @@ export const JOIN_BROWSER_ARGS: readonly string[] = [
   "--disable-features=VizDisplayCompositor",
   "--disable-site-isolation-trials",
   "--start-maximized",
+  "--start-fullscreen",
   "--window-size=1920,1080",
   "--window-position=0,0",
   "--force-device-scale-factor=1",
+  "--test-type",
+  "--no-default-browser-check",
+  "--no-first-run",
 ];
 
 /** The canonical join launch args, as a fresh mutable array per call. Includes

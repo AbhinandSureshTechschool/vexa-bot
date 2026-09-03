@@ -42,9 +42,13 @@ export function getAuthenticatedBrowserArgs(): string[] {
     '--disable-features=VizDisplayCompositor',
     '--password-store=basic',
     '--start-maximized',
+    '--start-fullscreen',
     '--window-size=1920,1080',
     '--window-position=0,0',
     '--force-device-scale-factor=1',
+    '--test-type',
+    '--no-default-browser-check',
+    '--no-first-run',
   ];
 }
 
@@ -59,9 +63,13 @@ export function getBrowserSessionArgs(): string[] {
     '--disable-blink-features=AutomationControlled',
     '--use-fake-ui-for-media-stream',
     '--start-maximized',
+    '--start-fullscreen',
     '--window-size=1920,1080',
     '--window-position=0,0',
     '--force-device-scale-factor=1',
+    '--test-type',
+    '--no-default-browser-check',
+    '--no-first-run',
     ...CDP_DEBUG_ARGS,
     '--password-store=basic',
   ];

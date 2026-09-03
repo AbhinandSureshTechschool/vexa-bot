@@ -20,8 +20,35 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.3
 done
 
+# Configure Fluxbox to hide toolbar, remove window borders, and maximize all windows
+mkdir -p /root/.fluxbox
+cat << 'EOF' > /root/.fluxbox/init
+session.screen0.toolbar.visible: false
+session.screen0.defaultDeco: NONE
+EOF
+
+cat << 'EOF' > /root/.fluxbox/apps
+[app] (name=.*)
+  [Dimensions] {1920 1080}
+  [Position] (TOPLEFT) {0 0}
+  [Deco] {NONE}
+  [Maximized] {yes}
+[end]
+EOF
+
 echo "[entrypoint] Starting fluxbox..."
 fluxbox >/tmp/fluxbox.log 2>&1 &
+
+# Also run a background loop to ensure any mapped window stays at (0,0) with 1920x1080
+(
+  while true; do
+    for wid in $(xdotool search --onlyvisible --class ".*" 2>/dev/null); do
+      xdotool windowmove "$wid" 0 0 2>/dev/null || true
+      xdotool windowsize "$wid" 1920 1080 2>/dev/null || true
+    done
+    sleep 2
+  done
+) >/dev/null 2>&1 &
 
 echo "[entrypoint] Starting PulseAudio (no idle exit)..."
 pulseaudio --start --exit-idle-time=-1 --log-target=syslog 2>/dev/null || true

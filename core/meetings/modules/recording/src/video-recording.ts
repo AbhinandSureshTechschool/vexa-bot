@@ -43,7 +43,7 @@ export class VideoRecordingService {
   ) {
     this.display = process.env.DISPLAY || ':99';
     this.hwaccel = (process.env.VIDEO_HWACCEL || 'none').toLowerCase() as VideoHwAccel;
-    this.encodeH264 = process.env.ENCODE_H264 === 'true';
+    this.encodeH264 = process.env.ENCODE_H264 !== 'false';
     this.format = (this.hwaccel === 'none' && !this.encodeH264) ? 'webm' : 'mp4';
     this.filePath = path.join('/tmp', `video_recording_${meetingId}_${sessionUid}.${this.format}`);
   }
@@ -235,12 +235,13 @@ export class VideoRecordingService {
     const isWebm = this.format === 'webm';
     const audioCodecArgs = isWebm
       ? ['-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-af', 'aresample=async=1']
-      : ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-af', 'aresample=async=1'];
+      : ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-af', 'aresample=async=1', '-movflags', '+faststart'];
 
     const args = [
       '-y',
       '-i', this.filePath,
       ...(audioDelaySec > 0 ? ['-itsoffset', audioDelaySec.toFixed(3)] : []),
+      '-fflags', '+genpts',
       '-i', audioPath,
       '-map', '0:v:0',
       '-map', '1:a:0',

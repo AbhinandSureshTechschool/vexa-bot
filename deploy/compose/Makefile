@@ -149,7 +149,7 @@ bot:
 	@# (telemetry.ts sessionHeader/sidecarHeader). A dirty tree still stamps its HEAD sha — the tape
 	@# says which commit, never which uncommitted edit, so a fixture from a local build is labelled
 	@# approximately rather than falsely precisely.
-	docker build -t $(BOT_IMAGE) \
+	docker build -t $(BOT_IMAGE) -t vexaai/vexa-bot:v012 -t vexaai/vexa-bot:latest \
 	  --build-arg VEXA_IMAGE_VERSION=$$(git -C $(REPO_ROOT) rev-parse --short HEAD 2>/dev/null || echo unknown) \
 	  -f $(REPO_ROOT)/core/meetings/services/bot/Dockerfile $(REPO_ROOT)
 	@_rt=$$($(COMPOSE) ps -q runtime 2>/dev/null); _live=""; \
