@@ -32,7 +32,8 @@
 import { RecordingService, type RecordingMasterFormat } from '@vexa/recording';
 import type { Invocation } from './config.js';
 import type { RecordingSink } from './ports.js';
-import { writeFile, unlink } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
+import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -43,6 +44,10 @@ export interface BotRecordingSink extends RecordingSink {
   /** One recording.v1 chunk for `key`: monotonic seq, the COMPLETED-signal flag, format, bytes. */
   chunk(key: string, seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void;
   waitForUploads(): Promise<void>;
+  getLocalAudioPath(): string | null;
+  cleanupLocalAudio(): Promise<void>;
+  getStartTime(): number;
+  markStarted(): void;
 }
 
 /** Deliver ONE recording.v1 chunk. The default uploads to inv.recordingUploadUrl via
@@ -57,6 +62,11 @@ export interface RecordingSinkOptions {
    *  receiver). Default = HTTP upload to inv.recordingUploadUrl via RecordingService.uploadChunk. */
   uploadChunk?: ChunkUploader;
   log?: (msg: string) => void;
+  /** When true (e.g. video recording will mux the audio directly into the video container),
+   *  audio chunks are saved locally on disk for muxing but NOT uploaded as a separate audio master to the server. */
+  skipServerUpload?: boolean;
+  /** Enable accumulating chunks locally on disk for offline muxing. Defaults to true when skipServerUpload is true. */
+  saveLocalAudio?: boolean;
 }
 
 /** The default chunk uploader: POST each chunk to meeting-api's internal upload endpoint via the
@@ -77,39 +87,35 @@ function defaultChunkUploader(inv: Invocation, log: (m: string) => void): ChunkU
   };
 }
 
-export async function downloadAudioMaster(inv: Invocation): Promise<string | null> {
+/**
+ * Fetch the assembled audio master from meeting-api and write it to a local temp file.
+ * Returns the path to the downloaded audio file.
+ */
+export async function downloadAudioMaster(inv: Invocation): Promise<string> {
   const uploadUrl = inv.recordingUploadUrl;
   const sessionUid = inv.connectionId;
-  const token = inv.internalSecret;
+  const secret = inv.internalSecret;
 
-  if (!uploadUrl || !sessionUid || !token) {
-    return null;
+  if (!uploadUrl || !sessionUid || !secret) {
+    throw new Error('Missing uploadUrl, sessionUid, or internalSecret for audio master download');
   }
 
   const url = new URL(uploadUrl);
-  url.pathname = '/internal/recordings/audio-master';
-  url.search = `session_uid=${encodeURIComponent(sessionUid)}`;
+  const audioMasterUrl = `${url.protocol}//${url.host}/internal/recordings/audio-master?session_uid=${encodeURIComponent(sessionUid)}`;
 
-  const response = await fetch(url, {
-    method: 'GET',
+  const response = await fetch(audioMasterUrl, {
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${secret}`,
     },
   });
 
   if (!response.ok) {
-    throw new Error(
-      `Audio master download failed: ${response.status} ${await response.text()}`
-    );
+    throw new Error(`Failed to download audio master: HTTP ${response.status} ${response.statusText}`);
   }
-
-  const format = response.headers.get('content-type')?.includes('audio/wav')
-    ? 'wav'
-    : 'webm';
 
   const audioPath = path.join(
     tmpdir(),
-    `audio_master_${inv.meeting_id ?? 'unknown'}_${sessionUid}.${format}`,
+    `audio_master_${inv.meeting_id ?? '0'}_${sessionUid}.wav`
   );
 
   const audioBytes = Buffer.from(await response.arrayBuffer());
@@ -131,15 +137,41 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
   let finalSent = false;                               // has an is_final chunk been sent? (fallback guard)
   let maxSeq = -1;                                     // highest seq seen → the fallback's seq
   let lastFormat: RecordingMasterFormat = 'webm';      // format for the empty-final fallback
+  let localAudioPath: string | null = null;
+  let startTime = 0;
+  const shouldSaveLocal = opts.saveLocalAudio ?? !!opts.skipServerUpload;
 
   const enqueue = (seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void => {
     anyChunk = true;
+    if (!startTime) startTime = Date.now();
     if (isFinal) finalSent = true;
     if (seq > maxSeq) maxSeq = seq;
     lastFormat = format;
-    queue = queue
-      .then(() => upload(seq, isFinal, format, bytes))
-      .catch((e) => { log(`recording: chunk ${seq} (isFinal=${isFinal}) upload failed — continuing: ${String(e)}`); });
+
+    // Write chunk bytes to local disk if local audio accumulation is requested
+    if (shouldSaveLocal && bytes.length > 0) {
+      try {
+        if (!localAudioPath) {
+          localAudioPath = path.join(
+            tmpdir(),
+            `audio_local_${opts.inv.meeting_id ?? '0'}_${opts.inv.connectionId ?? 'sess'}_${Date.now()}.${format}`,
+          );
+          if (fs.existsSync(localAudioPath)) {
+            try { fs.unlinkSync(localAudioPath); } catch {}
+          }
+        }
+        fs.appendFileSync(localAudioPath, Buffer.from(bytes));
+      } catch (e) {
+        log(`recording: chunk ${seq} local write failed: ${String(e)}`);
+      }
+    }
+
+    // Only upload separate audio chunks if server upload is not explicitly skipped
+    if (!opts.skipServerUpload) {
+      queue = queue
+        .then(() => upload(seq, isFinal, format, bytes))
+        .catch((e) => { log(`recording: chunk ${seq} (isFinal=${isFinal}) upload failed — continuing: ${String(e)}`); });
+    }
   };
 
   return {
@@ -147,7 +179,30 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
     waitForUploads: async () => {
       await queue;
     },
+    getLocalAudioPath: () => {
+      if (localAudioPath && fs.existsSync(localAudioPath)) {
+        try {
+          const stats = fs.statSync(localAudioPath);
+          if (stats.size > 0) return localAudioPath;
+        } catch {}
+      }
+      return null;
+    },
+    cleanupLocalAudio: async () => {
+      if (localAudioPath) {
+        try {
+          const { unlink } = await import('node:fs/promises');
+          await unlink(localAudioPath);
+        } catch { /* ignore */ }
+        localAudioPath = null;
+      }
+    },
+    getStartTime: () => startTime,
+    markStarted: () => {
+      if (!startTime) startTime = Date.now();
+    },
     close: (_key) => {
+      if (opts.skipServerUpload) return;
       // Final-signal FALLBACK: if the live Stop race dropped the trailing is_final chunk, send one
       // empty is_final so the server flips the recording COMPLETED. No-op for a never-fed session
       // (no phantom recording), and at most once (a real is_final already set finalSent).

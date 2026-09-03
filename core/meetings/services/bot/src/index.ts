@@ -196,13 +196,18 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   let pipeline: Pipeline;
   let botPipeline: BotPipeline | null = null;
   let acts: ActsSource = liveActs;
-  const recording = inv.recordingEnabled ? createBotRecordingSink({ inv, log: (m) => console.log(`[bot] ${m}`) }) : undefined;
+  const videoRecordingMeetingId = inv.meeting_id ?? (typeof meetingId === 'number' ? meetingId : 0);
+  const videoRecordingSessionUid = inv.connectionId ?? 'session';
   const videoRecording =
     inv.recordingEnabled &&
-      inv.meeting_id !== undefined &&
-      !!inv.connectionId
-      ? new VideoRecordingService(inv.meeting_id, inv.connectionId)
+      (inv.meeting_id !== undefined || !!inv.connectionId)
+      ? new VideoRecordingService(videoRecordingMeetingId, videoRecordingSessionUid)
       : undefined;
+  const recording = inv.recordingEnabled ? createBotRecordingSink({
+    inv,
+    log: (m) => console.log(`[bot] ${m}`),
+    skipServerUpload: !!videoRecording,
+  }) : undefined;
   // O-TEL-1: persist the raw captured-signal.v1 stream for offline replay. Off ⇒ the tap is a
   // single undefined-check and the capture path is byte-for-byte unchanged. VEXA_CAPTURE_SIGNAL=1
   // enables it without a control plane (the local hot-loop path).
@@ -297,6 +302,10 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
       startCapture: () => startCaptureBridge(sess.page, inv, bp, signalRecorder?.sink, publishChat, remoteAudioActivity),   // on the live meeting page
       startRecording: rec || videoRecording
         ? async () => {
+          if (rec) {
+            rec.markStarted();
+          }
+
           const stopAudio = rec
             ? await startRecording(sess.page, inv, rec)
             : async () => { };
@@ -313,44 +322,72 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
           }
 
           return async () => {
-  await stopAudio().catch(() => { });
+            // 1. Stop audio recording and wait for final chunks to flush to disk
+            await stopAudio().catch(() => { });
 
-  if (rec) {
-    await rec.waitForUploads().catch((e) => {
-      console.error(`[bot] waiting for audio uploads failed: ${String(e)}`);
-    });
-  }
+            if (rec) {
+              await rec.waitForUploads().catch((e) => {
+                console.error(`[bot] waiting for audio uploads failed: ${String(e)}`);
+              });
+            }
 
-  if (videoRecording && videoStarted) {
-    let audioPath: string | null = null;
+            // 2. Stop video recording and finalize video file
+            if (videoRecording && videoStarted) {
+              let audioPath: string | null = null;
+              let isDownloadedAudio = false;
 
-    try {
-      audioPath = await downloadAudioMaster(inv);
+              try {
+                // Stop video recording cleanly first so all frames are written
+                await videoRecording.stop().catch((e) => {
+                  console.error(`[bot] videoRecording.stop failed: ${String(e)}`);
+                });
 
-      await videoRecording.stop();
+                // Prioritize local audio recorded directly from the page tap
+                audioPath = rec?.getLocalAudioPath() ?? null;
 
-      if (audioPath) {
-        await videoRecording.muxAudio(audioPath);
-      }
+                // Fallback to downloading audio master from server if local file is missing
+                if (!audioPath) {
+                  audioPath = await downloadAudioMaster(inv).catch((e) => {
+                    console.error(`[bot] audio master download fallback failed: ${String(e)}`);
+                    return null;
+                  });
+                  if (audioPath) isDownloadedAudio = true;
+                }
 
-      if (inv.recordingUploadUrl && inv.internalSecret) {
-        await videoRecording.upload(
-          inv.recordingUploadUrl,
-          inv.internalSecret
-        );
-      }
-    } catch (e) {
-      console.error(`[bot] combined recording failed: ${String(e)}`);
-    } finally {
-      if (audioPath) {
-        const { unlink } = await import('node:fs/promises');
-        await unlink(audioPath).catch(() => { });
-      }
+                // 3. Mux audio into video with timestamp synchronization
+                if (audioPath) {
+                  const audioStartTime = rec?.getStartTime() ?? 0;
+                  const videoStartTime = videoRecording.getStartTime() ?? 0;
+                  const audioDelayMs = (audioStartTime > 0 && videoStartTime > 0)
+                    ? Math.max(0, audioStartTime - videoStartTime)
+                    : 0;
+                  await videoRecording.muxAudio(audioPath, audioDelayMs);
+                } else {
+                  console.warn('[bot] No audio file available to mux into video');
+                }
 
-      await videoRecording.cleanup().catch(() => { });
-    }
-  }
-};
+                // 4. Upload the combined video file with audio
+                const uploadSecret = inv.internalSecret || inv.token;
+                if (inv.recordingUploadUrl && uploadSecret) {
+                  await videoRecording.upload(
+                    inv.recordingUploadUrl,
+                    uploadSecret
+                  );
+                }
+              } catch (e) {
+                console.error(`[bot] combined recording failed: ${String(e)}`);
+              } finally {
+                if (rec) {
+                  await rec.cleanupLocalAudio().catch(() => { });
+                }
+                if (audioPath && isDownloadedAudio) {
+                  const { unlink } = await import('node:fs/promises');
+                  await unlink(audioPath).catch(() => { });
+                }
+                await videoRecording.cleanup().catch(() => { });
+              }
+            }
+          };
         }
         : undefined,        // MediaRecorder → recording.v1
       engine: bp,
