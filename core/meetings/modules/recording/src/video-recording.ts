@@ -215,20 +215,37 @@ export class VideoRecordingService {
       return;
     }
 
+    try {
+      const audioStats = fs.statSync(audioPath);
+      if (audioStats.size === 0) {
+        log(`[VideoRecording] Audio file is empty (0 bytes), skipping mux: ${audioPath}`);
+        return;
+      }
+    } catch (e: any) {
+      log(`[VideoRecording] Could not stat audio file: ${e?.message}`);
+      return;
+    }
+
     const muxedPath = this.filePath.replace(`.${this.format}`, `_muxed.${this.format}`);
     const audioDelaySec = Math.max(0, audioDelayMs / 1000);
 
-    // -itsoffset delays the audio input so it aligns with the video timeline.
-    // Without this, audio that started later than video would play too early.
+    // Explicit stream mapping: take video from input 0, audio from input 1.
+    // Re-encode audio to libopus (for webm) or aac (for mp4) with async resampling to handle
+    // non-monotonic timestamps from MediaRecorder chunks cleanly without stream errors.
+    const isWebm = this.format === 'webm';
+    const audioCodecArgs = isWebm
+      ? ['-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-af', 'aresample=async=1']
+      : ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-af', 'aresample=async=1'];
+
     const args = [
       '-y',
       '-i', this.filePath,
       ...(audioDelaySec > 0 ? ['-itsoffset', audioDelaySec.toFixed(3)] : []),
       '-i', audioPath,
+      '-map', '0:v:0',
+      '-map', '1:a:0',
       '-c:v', 'copy',
-      // Copy audio stream when possible; WAV/PCM must be encoded for webm/mkv containers.
-      '-c:a', audioPath.endsWith('.wav') ? (this.format === 'webm' ? 'libopus' : 'aac') : 'copy',
-      '-shortest',
+      ...audioCodecArgs,
       muxedPath,
     ];
 

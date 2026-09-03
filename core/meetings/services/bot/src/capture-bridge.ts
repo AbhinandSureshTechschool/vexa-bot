@@ -594,6 +594,7 @@ export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
   // join args win on conflict (later wins in Chromium arg parsing).
   const args = [...getAuthenticatedBrowserArgs(), ...getJoinBrowserArgs()];
   const { context, page } = await launchPersistentBrowser({ dataDir, args });
+  await page.setViewportSize({ width: 1920, height: 1080 }).catch(() => {});
 
   // Voice-agent gate the page reads to decide whether to keep the mic hot (production parity).
   await context.addInitScript(`window.__vexa_voice_agent_enabled = ${!!inv.voiceAgentEnabled};`);

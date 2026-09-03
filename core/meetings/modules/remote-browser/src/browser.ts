@@ -83,5 +83,6 @@ export async function launchPersistentBrowser(
 
   const pages = context.pages();
   const page = pages.length > 0 ? pages[0] : await context.newPage();
+  await page.setViewportSize({ width: 1920, height: 1080 }).catch(() => {});
   return { context: context as BrowserContext, page: page as Page };
 }

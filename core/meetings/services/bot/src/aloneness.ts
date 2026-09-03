@@ -1,7 +1,7 @@
 /** Active-phase aloneness derived from the remote-audio signal. */
 import type { AlonenessSource } from './ports.js';
 
-export const DEFAULT_ALONE_SILENCE_WINDOW_MS = 10 * 1000;
+export const DEFAULT_ALONE_SILENCE_WINDOW_MS = 10 * 60 * 1000;
 export const DEFAULT_ALONENESS_POLL_MS = 1_500;
 /** Presence floor for a DELIVERED remote frame — deliberately 0 (arrival is the signal).
  *

@@ -317,6 +317,7 @@ export async function joinGoogleMeeting(
   botConfig: BotConfig
 ): Promise<void> {
   const navUrl = withPinnedMeetLocale(meetingUrl, resolveBotUiLocale());
+  await page.setViewportSize({ width: 1920, height: 1080 }).catch(() => {});
   await page.goto(navUrl, { waitUntil: "domcontentloaded" });
   await page.bringToFront();
 

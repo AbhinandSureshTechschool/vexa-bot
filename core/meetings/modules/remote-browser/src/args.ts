@@ -41,6 +41,10 @@ export function getAuthenticatedBrowserArgs(): string[] {
     '--use-file-for-fake-video-capture=/dev/null',
     '--disable-features=VizDisplayCompositor',
     '--password-store=basic',
+    '--start-maximized',
+    '--window-size=1920,1080',
+    '--window-position=0,0',
+    '--force-device-scale-factor=1',
   ];
 }
 
@@ -57,6 +61,7 @@ export function getBrowserSessionArgs(): string[] {
     '--start-maximized',
     '--window-size=1920,1080',
     '--window-position=0,0',
+    '--force-device-scale-factor=1',
     ...CDP_DEBUG_ARGS,
     '--password-store=basic',
   ];
