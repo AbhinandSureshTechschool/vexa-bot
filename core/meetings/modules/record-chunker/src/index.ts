@@ -307,14 +307,55 @@ export interface CreateRecordingTapOptions extends RecordingTapOptions {
  */
 export function createRecordingTap(opts: CreateRecordingTapOptions): RecordingTap {
   let chunker: MediaRecorderChunker | null = null;
+  let ctx: AudioContext | null = null;
+  let scanInterval: ReturnType<typeof setInterval> | null = null;
+  const connectedIds = new Set<string>();
+
   return {
     async start(): Promise<void> {
       let stream = opts.stream;
       if (!stream) {
-        const els = await findMediaElements();
-        if (els.length === 0) { blog("[record-chunker] no media elements — cannot record"); return; }
-        stream = await buildCombinedStream(els);
+        ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 48000 });
+        void ctx.resume().catch(() => {});
+        const dest = ctx.createMediaStreamDestination();
+        stream = dest.stream;
+
+        const connectStream = (s: MediaStream, label: string) => {
+          if (!s || connectedIds.has(s.id)) return;
+          const tracks = s.getAudioTracks ? s.getAudioTracks() : [];
+          if (tracks.length === 0) return;
+          try {
+            const src = ctx!.createMediaStreamSource(s);
+            src.connect(dest);
+            connectedIds.add(s.id);
+            blog(`[record-chunker] connected ${label} stream id=${s.id} (tracks=${tracks.length})`);
+          } catch (e: any) {
+            blog(`[record-chunker] could not connect stream ${s.id}: ${e?.message}`);
+          }
+        };
+
+        const scan = () => {
+          if (!ctx) return;
+          // 1. Hook WebRTC captured remote streams from __vexaCapturedRemoteAudioStreams
+          const rStreams = (window as any).__vexaCapturedRemoteAudioStreams as MediaStream[] | undefined;
+          if (Array.isArray(rStreams)) {
+            for (const s of rStreams) connectStream(s, 'webrtc');
+          }
+          // 2. Hook DOM <audio> and <video> elements
+          const all = Array.from(document.querySelectorAll('audio, video')) as HTMLMediaElement[];
+          for (const el of all) {
+            try {
+              const s = el.srcObject || (typeof (el as any).captureStream === 'function' && (el as any).captureStream());
+              if (s instanceof MediaStream) connectStream(s, 'element');
+            } catch {}
+          }
+        };
+
+        // Run initial scan immediately and schedule periodic discovery for late joiners
+        scan();
+        scanInterval = setInterval(scan, 1500);
       }
+
       chunker = new MediaRecorderChunker({
         stream,
         timesliceMs: opts.timesliceMs ?? 15000,
@@ -324,8 +365,17 @@ export function createRecordingTap(opts: CreateRecordingTapOptions): RecordingTa
       await chunker.start();
     },
     async stop(): Promise<void> {
+      if (scanInterval) {
+        clearInterval(scanInterval);
+        scanInterval = null;
+      }
       await chunker?.stop();
       chunker = null;
+      if (ctx) {
+        try { await ctx.close(); } catch {}
+        ctx = null;
+      }
+      connectedIds.clear();
     },
   };
 }

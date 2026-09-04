@@ -53,7 +53,14 @@ fluxbox >/tmp/fluxbox.log 2>&1 &
 echo "[entrypoint] Starting PulseAudio (no idle exit)..."
 pulseaudio --start --exit-idle-time=-1 --log-target=syslog 2>/dev/null || true
 sleep 1
-# Voice/capture audio graph (best-effort; only the speak path strictly needs it).
+# Voice/capture audio graph:
+# 1. meeting_sink: default unmuted output where Chromium plays all meeting audio
+pactl load-module module-null-sink sink_name=meeting_sink \
+  sink_properties=device.description="MeetingAudioSink" 2>/dev/null || true
+pactl set-default-sink meeting_sink 2>/dev/null || true
+pactl set-sink-mute meeting_sink 0 2>/dev/null || true
+
+# 2. tts_sink -> virtual_mic: speak path for bot voice output
 pactl load-module module-null-sink sink_name=tts_sink \
   sink_properties=device.description="TTSAudioSink" 2>/dev/null || true
 pactl load-module module-remap-source master=tts_sink.monitor source_name=virtual_mic \
